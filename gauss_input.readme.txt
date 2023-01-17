@@ -1,0 +1,11 @@
+column, variable, unit
+0, emission rate, grams per second
+1, stack height, meters
+2, stack area, square meters
+3, gas exit temperature, degrees celsius
+4, gas exit velocity, meters per second
+5, wind direction, degrees
+6, wind speed, meters per second
+7, percent clear sky, [0,1]
+8, percent few clouds, [0,1]
+9, ambient temperature, degrees celsius
