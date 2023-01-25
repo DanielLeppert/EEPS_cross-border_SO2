@@ -7,11 +7,17 @@ library(rgdal)
 library(ggplot2)
 library(rgeos)
 library(MatchIt)
+library("mice")
+
+rm(list = ls())
+
 
 setwd('C:/Users/Danie/OneDrive - Durham University/Daniel_phd_projects/CAA_II/')
 
 data <- read.csv('data_final.csv')
-carbon_data <- read.csv('./carbon/carbon_annual.csv') 
+carbon_data <- read.csv('./carbon/carbon_annual.csv') %>% 
+  filter(!is.na(carbon_short)) %>% group_by(id, year) %>%
+  summarise(carbon = sum(carbon_short))
 weather_data <- read.csv("weather_data/weather_data.csv")
 disp_barry <- read.csv('disp_data.csv')
 disp_neal <- read.csv('disp_data2.csv')
@@ -25,20 +31,12 @@ naaqs_test <- function(ExternalSulfur) {
   if (ExternalSulfur*1e+6 > 0.75 / 2.66) {
     
     return(1)
-  }
-  else {return(0)}
   
+    }
+ 
+    else {return(0)}
 }
 
-
-library("mice")
-
-e_mids <- mice::mice(carbon_data, method = "cart", seed = 123)
-
-carbon <- mice::complete(e_mids)
-
-carbon <- carbon %>% group_by(id, year, state) %>%
-  summarise(carbon = sum(carbon_short))
 
 cair_states = c('TX', 'LA', 'MS', 'AL', 'GA', 'FL', 'SC', 'NC', 'VA', 'TN', 'KY', 'WV',
                 'MO', 'IA','OH', 'IN', 'MI', 'PA', 'MD', 'DE', 'NJ', 'NY', 'IL', 'WI')
@@ -60,10 +58,10 @@ dists <- as.data.frame(geosphere::dist2Line(p = dist_data, line = us_cont)) %>%
   rename(id = 'dist_data$id')
 
 data <- data %>% 
-  left_join(carbon, by = c("id","year",'state')) %>%
+  left_join(carbon_data, by = c("id","year")) %>%
   left_join(dists, by = 'id') %>%
   mutate(border_dist = distance/1000) %>%
-  filter(op_time > 0)
+  filter(op_time > 0 & sulfur > 0)
 
 data$drop <- 0
 for (i in unique(data$id)) { 
@@ -72,21 +70,33 @@ for (i in unique(data$id)) {
   }
 }
 
-data <- data[data$drop == 0, ] %>% select(-drop)
-
-data_mids <- mice::mice(data, method = "pmm", seed = 123)
-
-data_impute <- mice::complete(data_mids)
+data <- data %>% filter(drop == 0) %>% select(-drop)
 
 
-data_impute <- data_impute %>%
+# impute with predictive mean matching
+gen_mids <- mice::mice(data[ , c("id","year","state","sulfur","generation")], method = "pmm", seed = 123)
+
+gen_impute <- mice::complete(gen_mids)
+
+carbon_mids <- mice::mice(data[ , c("id","year","state","carbon")], method = "pmm", seed = 123)
+
+carbon_impute <- mice::complete(carbon_mids)
+
+
+
+data_impute <- data %>%
+  select(-c(generation, carbon)) %>%
+  left_join(gen_impute, by = c("id","year","state")) %>%
+  left_join(carbon_impute, by = c("id","year","state")) %>%
   mutate(ln_sulfur = log(sulfur),
          ln_carbon = log(carbon),
-         did = treated*CAIR,
-         cross_border = ifelse(ext_sulfur_sum > 0, 1, 0),
          naaqs_violate = 0,
          naaqs_domestic = 0,
-         share = ext_sulfur_sum/total_sulfur*100)
+         share = ext_sulfur_sum/total_sulfur*100,
+         under5miles = ifelse(distance < 5000/0.62, 1, 0),
+         under10miles = ifelse(distance < 10000/0.62, 1, 0))
+
+
 
 for (i in 1:nrow(data_impute)) {
   # check if cross-border and within-state concentration exceed 1% NAAQS
@@ -95,48 +105,36 @@ for (i in 1:nrow(data_impute)) {
   
 }
 
-data <- data %>%
-  mutate(ln_sulfur = log(sulfur),
-         ln_carbon = log(carbon),
-         did = treated*CAIR,
-         cross_border = ifelse(ext_sulfur_mean > 0, 1, 0),
-         did_cb = did*cross_border,
-         share = ext_sulfur_sum/total_sulfur*100) %>%
-  
+
 
 # propensity score matching of 2004 groups
 data_2004 <- data_impute %>% filter(year == 2004)
 
-m_ps <- glm(formula = treated ~ heat_input + sulfur + generation + distance, family = binomial(), data = data_impute)
+m_ps <- glm(formula = treated ~ distance + share + heat_input + generation, family = binomial(), data = data_2004)
 
 prs_df <- data.frame(pr_score = predict(m_ps, type = "response"), treated = m_ps$model$treated)
 
-mod_match <- matchit(treated ~ heat_input + sulfur + generation + border_dist, method = "nearest", data = data_2004)
+mod_match <- matchit(treated ~ distance + share + heat_input, method = "nearest", data = data_2004)
 dta_m <- match.data(mod_match, distance = "nearest")
 
-# filter matched IDs
 data_matched <- data_impute[data_impute$id %in% dta_m$id, ]
 
 # save data
 write.csv(data, "data_noimpute.csv")
 write.csv(data_impute, "data_impute.csv")
 
+
+
+
 # Estimation
 
-rm(list = ls())
 
-library(plm)
-library(lmtest)
-
-data_impute <- read.csv('data_impute.csv')
-
-
-# first stage regression
+# regressions
 
 emit_lm <- feols(ln_sulfur ~ treated*CAIR +                 ## the key interaction: time × treatment status
                    heat_input + generation + op_time + sulfur_control + permits + allocated |  ## Other controls
-                   id + year,                                                             ## FEs
-                 cluster = ~id,                                                         ## Clustered SEs
+                   id + year,                                                                  ## FEs
+                 cluster = ~id,                                                                ## Clustered SEs
                  data = data_impute)
 
 cair_lm <- feols(ext_sulfur_mean ~ treated*CAIR +                      ## the key interaction: time × treatment status
@@ -152,55 +150,104 @@ carbon_lm <- feols(ln_carbon ~ treated*CAIR +                                   
                  data = data_impute)
 
 cair_lpm <- feols(naaqs_violate ~ treated*CAIR + 
-                    sulfur + generation + heat_input + op_time + sulfur_control + permits + allocated |
+                    sulfur + generation + heat_input + op_time + sulfur_control + permits + allocated  |
                     id + year,
                     cluster = ~id, 
                     data = data_impute)
 
-emit_ddd <- feols(ln_sulfur ~ treated*CAIR*cross_border 
-                    + generation + heat_input + op_time + sulfur_control + permits + allocated |
-                    id + year,
-                  cluster = ~id, 
-                  data = data_impute)
-
-carbon_ddd <- feols(ln_carbon ~ treated*CAIR*cross_border +
+emit_ddd <- feols(ln_sulfur ~ treated*CAIR*naaqs_violate + 
                     generation + heat_input + op_time + sulfur_control + permits + allocated |
                     id + year,
                   cluster = ~id, 
                   data = data_impute)
 
-ddd_sensitivity <- feols(ln_sulfur ~ treated*CAIR*cross_border + generation + heat_input + op_time + sulfur_control + permits + allocated |
+
+ddd_sensitivity_5m <- feols(ln_sulfur ~ treated*CAIR*under5miles +
+                    generation + heat_input + op_time + sulfur_control + permits + allocated |
                     id + year,
                   cluster = ~id, 
-                  data = data_impute[data_impute$border_dist > 5/0.62, ])
+                  data = data_impute)
 
-ddd_sensitivity_carbon <- feols(ln_carbon ~ treated*CAIR*cross_border + 
-                            sulfur + generation + heat_input + op_time + sulfur_control + permits + allocated |
-                           id + year,
-                         cluster = ~id, 
-                         data = data_impute[data_impute$border_dist > 5/0.62, ])
-
-naaqs_lpm <- feols(naaqs_domestic ~ treated*CAIR +                 ## the key interaction: time × treatment status
-                   sulfur + heat_input + generation + op_time + sulfur_control + permits + allocated |  ## Other controls
-                   id + year,                                                             ## FEs
-                 cluster = ~id,                                                         ## Clustered SEs
-                 data = data_impute)
+ddd_sensitivity_10m <- feols(ln_sulfur ~ treated*CAIR*under10miles + 
+                        generation + heat_input + op_time + sulfur_control + permits + allocated |
+                    id + year,
+                  cluster = ~id, 
+                  data = data_impute)
 
 
 
 etable(emit_lm, se = 'hetero')
 etable(cair_lm, se = 'hetero')
 etable(cair_lpm, se = 'hetero')
-etable(naaqs_lpm, se = 'hetero')
 etable(carbon_lm, se = 'hetero')
 etable(emit_ddd, se = "hetero")
-etable(carbon_ddd, se = "hetero")
+etable(ddd_sensitivity_5m, se = "hetero")
+etable(ddd_sensitivity_10m, se = "hetero")
+
+
+###################################################################################################
+
+# Regression with matched controls
+
+# regressions
+
+emit_lm <- feols(ln_sulfur ~ treated*CAIR +                 ## the key interaction: time × treatment status
+                   heat_input + generation + op_time + sulfur_control + permits + allocated |  ## Other controls
+                   id + year,                                                             ## FEs
+                 cluster = ~id,                                                         ## Clustered SEs
+                 data = data_matched)
+
+cair_lm <- feols(ext_sulfur_mean ~ treated*CAIR +                      ## the key interaction: time × treatment status
+                   sulfur + generation + heat_input + op_time + sulfur_control + permits + allocated |  ## Other controls
+                   id + year,
+                 cluster = ~id,                                             ## Clustered SEs
+                 data = data_matched)
+
+carbon_lm <- feols(ln_carbon ~ treated*CAIR +                                     ## the key interaction: time × treatment status
+                     heat_input + generation + op_time + sulfur + sulfur_control + permits + allocated  |  ## Other controls
+                     id + year,
+                   cluster = ~id,                                             ## Clustered SEs
+                   data = data_matched)
+
+cair_lpm <- feols(naaqs_violate ~ treated*CAIR + 
+                    sulfur + generation + heat_input + op_time + sulfur_control + permits + allocated |
+                    id + year,
+                  cluster = ~id, 
+                  data = data_matched)
+
+emit_ddd <- feols(ln_sulfur ~ treated*CAIR*naaqs_violate
+                  + generation + heat_input + op_time + sulfur_control + permits + allocated |
+                    id + year,
+                  cluster = ~id, 
+                  data = data_matched)
+
+
+
+ddd_sensitivity <- feols(ln_sulfur ~ treated*CAIR*under5miles + 
+                           generation + heat_input + op_time + sulfur_control + permits + allocated |
+                           id + year,
+                         cluster = ~id, 
+                         data = data_matched)
+
+ddd_sensitivity_10m <- feols(ln_sulfur ~ treated*CAIR*under10miles + 
+                                  generation + heat_input + op_time + sulfur_control + permits + allocated |
+                                  id + year,
+                                cluster = ~id, 
+                                data = data_matched)
+
+
+etable(emit_lm, se = 'hetero')
+etable(cair_lm, se = 'hetero')
+etable(cair_lpm, se = 'hetero')
+etable(carbon_lm, se = 'hetero')
+etable(emit_ddd, se = "hetero")
 etable(ddd_sensitivity, se = "hetero")
-etable(ddd_sensitivity_carbon, se = "hetero")
+etable(ddd_sensitivity_10m, se = "hetero")
 
 
 
-ggplot(data_impute, aes(x = did, y = sulfur, color = as.factor(cross_border))) + geom_point()
+
+
 
 # plots
 
@@ -505,13 +552,11 @@ dev.off()
 
 # figure 5 (event study plots)
 
-data$time_to_cair <- data$year - 2005
+data_matched$time_to_cair <- data_matched$year - 2005
 data_impute$time_to_cair <- data_impute$year - 2005
 
-data$id <- as.factor(data$id)
-data$state <- as.factor(data$state)
 
-ext_twfe <- feols(ext_sulfur_sum ~ i(time_to_cair, treated, ref = -1) +                           ## the key interaction: time × treatment status
+ext_twfe <- feols(ext_sulfur_mean ~ i(time_to_cair, treated, ref = -1) +                           ## the key interaction: time × treatment status
                   sulfur_rate + sulfur_control + op_time + heat_input + allocated + permits   |   ## Other controls
                   id + year,                                                                              ## FEs
                   cluster = ~id,                                                                          ## Clustered SEs
@@ -527,17 +572,17 @@ naaqs_twfe <- feols(naaqs_violate ~ i(time_to_cair, treated, ref = -1) +        
                     sulfur + sulfur_control + generation + op_time + heat_input + allocated + permits   |   ## Other controls
                     id + year,                                                                              ## FEs
                   cluster = ~id,                                                                          ## Clustered SEs
-                  data = data_mathed)
+                  data = data_impute)
 
-naaqs_data <- data_mathed %>% 
+naaqs_data <- data_impute %>% 
   dplyr::select(time_to_cair) %>% 
   distinct() %>%
   cbind(c(naaqs_twfe$coefficients[1:7], 0, naaqs_twfe$coefficients[8:23]),
         c(naaqs_twfe$se[1:7]*1.96, 0, naaqs_twfe$se[8:23]*1.96))
 
 
-emit_twfe <- feols(log(sulfur) ~ i(time_to_cair, treated, ref = -1) +                          ## the key interaction: time × treatment status
-                      sulfur_control + op_time + heat_input + allocated + permits  |    ## Other controls
+emit_twfe <- feols(ln_sulfur ~ i(time_to_cair, treated, ref = -1) +                          ## the key interaction: time × treatment status
+                      sulfur_control + op_time + heat_input + generation + allocated + permits  |    ## Other controls
                       id + year,                                                                 ## FEs
                       cluster = ~id,                                                             ## Clustered SEs
                       data = data_impute)
@@ -547,7 +592,7 @@ emit_data <- data_impute %>% dplyr::select(time_to_cair) %>%
   cbind(c(emit_twfe$coefficients[1:7], 0, emit_twfe$coefficients[8:23]),
         c(emit_twfe$se[1:7]*1.96, 0, emit_twfe$se[8:23]*1.96))
 
-carbon_twfe <- feols(log(carbon) ~ i(time_to_cair, treated, ref = -1) +                               ## the key interaction: time × treatment status
+carbon_twfe <- feols(ln_carbon ~ i(time_to_cair, treated, ref = -1) +                               ## the key interaction: time × treatment status
                      sulfur_control + op_time + heat_input + sulfur + generation + allocated + permits |  ## Other controls
                      id + year,                                                                              ## FEs
                    cluster = ~id,                                                                          ## Clustered SEs
@@ -648,6 +693,7 @@ figure5d <- ggplot(data = naaqs_data, aes(x = time_to_treat)) +
   geom_ribbon(aes(ymin=coef-CI, ymax=coef+CI), fill="steelblue4", alpha=0.3) +
   geom_line(aes(y = coef), color = 'red', linetype='dashed') +
   geom_vline(xintercept =  0, linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "red") +
   ylab("Event study coefficients and 95% confidence interval") +
   xlab("Years since CAIR announced in 2005") +
   ggtitle(expression(paste("Cross-border ",SO[2],"> 1% NAAQS", sep=""))) +
@@ -663,111 +709,124 @@ figure5d <- ggplot(data = naaqs_data, aes(x = time_to_treat)) +
 
 png(filename="figure5d.png", 
     units="in", 
-    width=7, 
-    height=4, 
+    width=3.5, 
+    height=5, 
     pointsize=10, 
     res=600)
 figure5d
 dev.off()
 
 
-# figure 6
+# figure 6: By distance
 
-bar_cross = data_impute %>% 
-  select(year, sulfur, treated, cross_border) %>%
-  group_by(year, treated, cross_border) %>%
-  summarise(sulfur = mean(sulfur)) %>%
-  filter(cross_border == 1)%>%
-  select(-cross_border) %>%
-  rename(sulfur_c1 = sulfur)
+bar_dist = data_impute %>% select(CAIR, treated, sulfur, distance) %>%
+  mutate(dist_bracket = 0) %>% filter(sulfur > 100)
 
-bar_data = data_impute %>% 
-  select(year, sulfur, treated, cross_border) %>%
-  group_by(year, treated, cross_border) %>%
-  summarise(sulfur = mean(sulfur)) %>%
-  filter(cross_border == 0) %>%
-  select(-cross_border) %>%
-  rename(sulfur_c0 = sulfur) %>%
-  left_join(bar_cross, by = c("year","treated")) %>%
-  mutate(sulfur_c1_minus_c0 = sulfur_c1 - sulfur_c0)
+bar_dist[bar_dist$distance >= 1000 & bar_dist$distance < 5000, "dist_bracket"] = 1
+bar_dist[bar_dist$distance >= 5000 & bar_dist$distance < 10000, "dist_bracket"] = 2
+bar_dist[bar_dist$distance >= 10000 & bar_dist$distance < 20000, "dist_bracket"] = 3
+bar_dist[bar_dist$distance >= 20000 & bar_dist$distance < 50000, "dist_bracket"] = 4
+bar_dist[bar_dist$distance >= 50000, "dist_bracket"] = 5
 
-figure6 <- ggplot(bar_data, aes(x = year, y = sulfur_c1_minus_c0)) +
+dist_preCAIR = bar_dist %>%
+  filter(CAIR == 0) %>%
+  group_by(treated, dist_bracket) %>%
+  summarise(sulfur_preCAIR = mean(sulfur))
+
+dist_postCAIR = bar_dist %>%
+  filter(CAIR == 1) %>%
+  group_by(treated, dist_bracket) %>%
+  summarise(sulfur_postCAIR = mean(sulfur))
+
+dist_diff = dist_preCAIR %>%
+  left_join(dist_postCAIR, by = c("treated","naaqs_violate","dist_bracket")) %>%
+  mutate(diff_post = (sulfur_postCAIR - sulfur_preCAIR)/sulfur_preCAIR*-100)
+
+figure6 <- ggplot(dist_diff, aes(x = as.factor(dist_bracket), y = diff_post)) +
   geom_bar(aes(fill = as.factor(treated)), position = "dodge", stat = "identity") +
-  scale_fill_manual(values = c("steelblue4", "red"), name = "Program:", labels = c("Not covered by CAIR", "Covered by CAIR")) +
-  geom_vline(xintercept = 2005, linetype = "dashed", size = 1) +
-  ylab("Average annual sulfur (tonnes)") +
-  ggtitle(expression(paste("Difference in ", SO[2]," emissions between cross-border polluting states and others", sep=""))) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 100)) +
+  scale_fill_manual(values = c("steelblue4", "red"), name = "Program:", labels = c("Control group", "CAIR states")) +
+  scale_x_discrete(labels = c("<1,000m", "<5,000m", "<10,000m","<20,000m", "<50,000m","50,000m+")) +
+  ylab(expression(paste("Reduction in  ", SO[2], " emissions post-CAIR announcement (%)"))) +
+  xlab("Distance between Power Plant and State border") +
+  ggtitle(expression(paste("Reduction in  ", SO[2]," post-CAIR by border distance", sep=""))) +
   theme(axis.line = element_blank(),
         plot.margin=unit(c(1,1,1,1), 'cm'),
-        axis.title.y = element_text(size=12),
-        axis.title.x = element_blank(),
-        title = element_text(size=11),
+        axis.title.y = element_text(size=14),
+        axis.title.x = element_text(size=12),
+        title = element_text(size=12),
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
         panel.background = element_rect(fill = "lightsteelblue1", colour = "black"),
         panel.border = element_rect(colour = "black", fill=NA, size=1.5),
         legend.background = element_rect(fill = "white", colour = "black"),
-        legend.position = c(0.85, 0.85),
+        legend.position = c(0.85, 0.9),
         legend.box = "horizontal")
 
 png(filename="figure6.png", 
     units="in", 
-    width=7.8, 
-    height=5, 
+    width=6, 
+    height=8, 
     pointsize=10, 
     res=600)
 figure6
 dev.off()
 
 
+# Fig 7: by % of emissions cross-border
+
+bar_share = data_matched %>% select(CAIR, treated, sulfur, share) %>%
+  mutate(share_bracket = 0) %>% filter(sulfur > 100)
+
+bar_share[bar_share$share > 0 & bar_share$share < 5, "share_bracket"] = 1
+bar_share[(bar_share$share >= 5) & (bar_share$share < 10), "share_bracket"] = 2
+bar_share[(bar_share$share >= 10) & (bar_share$share < 20), "share_bracket"] = 3
+bar_share[bar_share$share >= 20 & bar_share$share < 50, "share_bracket"] = 4
+bar_share[bar_share$share >= 50, "share_bracket"] = 5
 
 
-bar_10km = data_impute %>% 
-  select(year, ext_sulfur_mean, treated, border_dist) %>%
-  mutate(border_dist = ifelse(border_dist < 10, 1, 0)) %>%
-  group_by(year, treated, border_dist) %>%
-  summarise(sulfur = mean(ext_sulfur_mean)) %>%
-  filter(border_dist == 1)%>%
-  select(-border_dist) %>%
-  rename(sulfur_under10km = sulfur)
+bar_preCAIR = bar_share %>%
+  filter(CAIR == 0) %>%
+  group_by(treated, share_bracket) %>%
+  summarise(sulfur_preCAIR = mean(sulfur))
 
-bar_10km_data = data_impute %>% 
-  select(year, ext_sulfur_mean, treated, border_dist) %>%
-  mutate(border_dist = ifelse(border_dist < 10, 1, 0)) %>%
-  group_by(year, treated, border_dist) %>%
-  summarise(sulfur = mean(ext_sulfur_mean)) %>%
-  filter(border_dist == 0) %>%
-  select(-border_dist) %>%
-  rename(sulfur_over10km = sulfur) %>%
-  left_join(bar_10km, by = c("year","treated")) %>%
-  mutate(sulfur_10km_diff = sulfur_under10km - sulfur_over10km)
+bar_postCAIR = bar_share %>%
+  filter(CAIR == 1) %>%
+  group_by(treated, share_bracket) %>%
+  summarise(sulfur_postCAIR = mean(sulfur))
 
-figure7 <- ggplot(bar_10km_data, aes(x = year, y = sulfur_10km_diff)) +
+bar_diff = bar_preCAIR %>%
+  left_join(bar_postCAIR, by = c("treated","share_bracket")) %>%
+  mutate(diff_post = (sulfur_postCAIR - sulfur_preCAIR)/sulfur_preCAIR*-100)
+
+
+
+figure7 <- ggplot(bar_diff, aes(x = as.factor(share_bracket), y = diff_post)) +
   geom_bar(aes(fill = as.factor(treated)), position = "dodge", stat = "identity") +
-  scale_fill_manual(values = c("steelblue4", "red"), name = "Program:", labels = c("Not covered by CAIR", "Covered by CAIR")) +
-  geom_vline(xintercept = 2005, linetype = "dashed", size = 1) +
-  ylab("Average annual sulfur (tonnes)") +
-  ggtitle(expression(paste("Difference in cross-border ", SO[2]," between plants within 10km from border and others", sep=""))) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 100)) +
+  scale_fill_manual(values = c("steelblue4", "red"), name = "Program:", labels = c("Control group", "CAIR states")) +
+  scale_x_discrete(labels = c("0%", "<5%", "<10%","<20%", "<50%","50-100%")) +
+  ylab(expression(paste("Reduction in  ", SO[2], " emissions post-CAIR announcement (%)"))) +
+  xlab("Proportion of pollutants transported across state boundary") +
+  ggtitle(expression(paste("Reduction in  ", SO[2]," post-CAIR by export share", sep=""))) +
   theme(axis.line = element_blank(),
         plot.margin=unit(c(1,1,1,1), 'cm'),
-        axis.title.y = element_text(size=12),
-        axis.title.x = element_blank(),
-        title = element_text(size=11),
+        axis.title.y = element_text(size=14),
+        axis.title.x = element_text(size=12),
+        title = element_text(size=12),
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
         panel.background = element_rect(fill = "lightsteelblue1", colour = "black"),
         panel.border = element_rect(colour = "black", fill=NA, size=1.5),
         legend.background = element_rect(fill = "white", colour = "black"),
-        legend.position = c(0.85, 0.85),
+        legend.position = "none",
         legend.box = "horizontal")
 
 png(filename="figure7.png", 
     units="in", 
-    width=7.8, 
-    height=5, 
+    width=6, 
+    height=8, 
     pointsize=10, 
     res=600)
 figure7
 dev.off()
-
-
