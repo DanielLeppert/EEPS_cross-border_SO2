@@ -126,36 +126,21 @@ write.csv(data_noimp, "data_noimp.csv")
 write.csv(data_impute, "data_impute.csv")
 
 
-# propensity score matching of 2004 groups
-data_2004 <- data_noimp %>% filter(year == 2004)
-
-m_ps <- glm(formula = treated ~ distance + share + heat_input, family = binomial(), data = data_2004)
-
-prs_df <- data.frame(pr_score = predict(m_ps, type = "response"), treated = m_ps$model$treated)
-
-mod_match <- matchit(treated ~ distance + share + heat_input, method = "nearest", data = data_2004)
-dta_m <- match.data(mod_match, distance = "nearest")
-
-data_matched <- data_impute[data_impute$id %in% dta_m$id, ]
-
-
-
 # Estimation
 
-
-emit_lm <- feols(ln_sulfur ~ treated*CAIR +                 ## the key interaction: time × treatment status
+emit_lm <- feols(ln_sulfur ~ treated*CAIR +                 ## the key interaction: time Ã— treatment status
                   log(heat_input) + log(generation) + log(op_time) + sulfur_control + log(permits+1)  |  ## Other controls
                   id + year,                                                                  ## FEs
                  cluster = ~id,                                                                ## Clustered SEs
                  data = data_noimp)
 
-cair_lm <- feols(ext_sulfur_mean*1e+6 ~ treated*CAIR +                      ## the key interaction: time × treatment status
+cair_lm <- feols(ext_sulfur_mean ~ treated*CAIR +                      ## the key interaction: time Ã— treatment status
                    log(sulfur) + sulfur_control + log(heat_input) + log(op_time) + log(generation) + log(permits+1) |  ## Other controls
                    id + year,
                  cluster = ~id,                                             ## Clustered SEs
                  data = data_noimp)
 
-carbon_lm <- feols(log(carbon) ~ treated*CAIR +                                     ## the key interaction: time × treatment status
+carbon_lm <- feols(ln_carbon ~ treated*CAIR +                                     ## the key interaction: time Ã— treatment status
                    log(heat_input) + log(generation) + log(sulfur) + log(op_time) + sulfur_control + log(permits+1)  |  ## Other controls
                    id + year,
                  cluster = ~id,                                             ## Clustered SEs
@@ -175,7 +160,7 @@ emit_ddd <- feols(ln_sulfur ~ treated*CAIR*naaqs_violate +
 
 
 ddd_sensitivity_5m <- feols(ln_sulfur ~ treated*CAIR*under10km +
-                    log(generation) + log(heat_input) + log(op_time) + sulfur_control + permits  |
+                    log(generation) + log(heat_input) + log(op_time) + sulfur_control + log(permits+1)  |
                     id + year,
                   cluster = ~id, 
                   data = data_noimp)
@@ -185,7 +170,6 @@ ddd_sensitivity_10m <- feols(ln_sulfur ~ treated*CAIR*under20km +
                     id + year,
                   cluster = ~id, 
                   data = data_noimp)
-
 
 
 etable(emit_lm, se = 'hetero')
@@ -199,17 +183,25 @@ etable(ddd_sensitivity_10m, se = "hetero")
 
 ###################################################################################################
 
+# propensity score matching of 2004 groups
+data_2004 <- data_noimp %>% filter(year == 2004)
+m_ps <- glm(formula = treated ~ distance + share + heat_input, family = binomial(), data = data_2004)
+prs_df <- data.frame(pr_score = predict(m_ps, type = "response"), treated = m_ps$model$treated)
+mod_match <- matchit(treated ~ distance + share + heat_input, method = "nearest", data = data_2004)
+dta_m <- match.data(mod_match, distance = "nearest")
+data_matched <- data_impute[data_impute$id %in% dta_m$id, ]
+
 # Regression with matched controls
 
 # regressions
 
-cair_lm <- feols(log(ext_sulfur_mean*1e+6+1) ~ treated*CAIR +                      ## the key interaction: time × treatment status
+cair_lm <- feols(log(ext_sulfur_mean) ~ treated*CAIR +                      ## the key interaction: time Ã— treatment status
                    log(sulfur) + sulfur_control + log(heat_input) + log(op_time) + log(generation) + log(permits+1) |  ## Other controls
                    id + year,
                  cluster = ~id,                                             ## Clustered SEs
                  data = data_matched)
 
-carbon_lm <- feols(log(carbon) ~ treated*CAIR +                                     ## the key interaction: time × treatment status
+carbon_lm <- feols(log(carbon) ~ treated*CAIR +                                     ## the key interaction: time Ã— treatment status
                      log(heat_input) + log(generation) + log(sulfur) + log(op_time) + sulfur_control + log(permits+1)  |  ## Other controls
                      id + year,
                    cluster = ~id,                                             ## Clustered SEs
@@ -220,9 +212,6 @@ cair_lpm <- feols(naaqs_violate ~ treated*CAIR +
                     id + year,
                   cluster = ~id, 
                   data = data_matched)
-
-
-
 
 etable(emit_lm, se = 'hetero')
 etable(cair_lm, se = 'hetero')
@@ -235,7 +224,7 @@ etable(carbon_lm, se = 'hetero')
 
 # plots
 
-so_co_scatter <- ggplot(plot_data, aes(y = log(carbon+0.000001), x = log(permits+1), color = sample)) +
+so_co_scatter <- ggplot(plot_data, aes(y = log(carbon), x = log(permits+1), color = sample)) +
   geom_point() +
   #annotate("label", x = 8, y = -10, label = "a: log(Carbon Dioxide)", size = 4) +
   scale_color_manual(values = c("steelblue4","red"), name = "Sample:", labels = c("NAs removed", "PMM imputation")) +
@@ -264,7 +253,7 @@ so_co_scatter
 dev.off()
 
 
-so_heat_scatter <- ggplot(plot_data, aes(y = log(sulfur+1e-6), x = log(heat_input+1e-6), color = sample)) + 
+so_heat_scatter <- ggplot(plot_data, aes(y = log(sulfur), x = log(heat_input), color = sample)) + 
   geom_point(alpha = 0.6) +
   scale_color_manual(values = c("steelblue4","red"), name = "Sample:", labels = c("NAs removed", "PMM imputation")) +
   xlab("log(Heat Input)") +
@@ -288,7 +277,7 @@ png(filename="scatter_heat.png",
 so_heat_scatter
 dev.off()
 
-so_gen_scatter <- ggplot(plot_data, aes(y = log(sulfur+1e-6), x = log(generation+1e-6), color = sample)) + 
+so_gen_scatter <- ggplot(plot_data, aes(y = log(sulfur), x = log(generation), color = sample)) + 
   geom_point(alpha = 0.6) +
   scale_color_manual(values = c("steelblue4","red"), name = "Sample:", labels = c("NAs removed", "PMM imputation")) +
   xlab("log(Generation)") +
@@ -312,7 +301,7 @@ png(filename="scatter_gen.png",
 so_gen_scatter
 dev.off()
 
-so_ot_scatter <- ggplot(plot_data, aes(y = log(sulfur+1e-6), x = log(op_time+1e-6), color = sample)) + 
+so_ot_scatter <- ggplot(plot_data, aes(y = log(sulfur), x = log(op_time), color = sample)) + 
   geom_point(alpha = 0.6) +
   scale_color_manual(values = c("steelblue4","red"), name = "Sample:", labels = c("NAs removed", "PMM imputation")) +
   xlab("log(Operating Time)") +
@@ -335,9 +324,6 @@ png(filename="scatter_optime.png",
     res=600)
 so_ot_scatter
 dev.off()
-
-
-
 
 
 
@@ -512,92 +498,6 @@ png(filename="figure2b.png",
 figure2b
 dev.off()
 
-
-
-# figure 2 (timeline plots)
-
-line_data_ <- data %>% filter(total_sulfur > 0) %>%
-             group_by(id, year) %>%
-             summarise(sulfur = sum(sulfur), ext = sum(ext_sulfur_sum), share = mean(share), treated = max(treated)) %>%
-             group_by(year, treated) %>% 
-             summarise(sulfur = mean(sulfur), ext = mean(ext), share=mean(share))
-
-# sulfur dioxide emissions
-figure3 <- ggplot(data = line_data_, aes(x = year, y = sulfur)) +
-           geom_line(aes(color=as.factor(treated)), size = 1) + 
-           scale_color_manual(values = c("steelblue4", "red"), name = "Program:", labels = c("Not covered by CAIR", "Covered by CAIR")) +
-           ylab(expression(paste("Average annual  ",SO[2]," emissions (tonnes)", sep=""))) +
-           theme(axis.line = element_blank(),
-                 axis.title.x = element_blank(),
-                 axis.title.y = element_text(size=10),
-                 title = element_blank(),
-                 panel.grid.major = element_blank(),
-                 panel.grid.minor = element_blank(),
-                 panel.background = element_rect(fill = "lightsteelblue1", colour = "black"),
-                 panel.border = element_rect(colour = "black", fill=NA, size=1.5),
-                 legend.background = element_rect(fill = "white", colour = "black"),
-                 legend.position = c(0.61, 0.87),
-                 legend.box = "vertical",
-                 legend.key = element_blank()) 
-
-# cross-state externalities
-figure3b <- ggplot(data = line_data_, aes(x = year, y = ext*1e+6)) +
-            geom_line(aes(color=as.factor(treated)), size = 1) + 
-            scale_color_manual(values = c("steelblue4", "red"), name = "Program:", labels = c("Not covered by CAIR", "Covered by CAIR")) +
-            ylab(expression(paste("Cross-border ", SO[2], " (", mu, "gs/", m^{3}, ")", sep=""))) +
-            theme(axis.line = element_blank(),
-                  axis.title.x = element_blank(),
-                  axis.title.y = element_text(size = 10),
-                  title = element_blank(),
-                  panel.grid.major = element_blank(),
-                  panel.grid.minor = element_blank(),
-                  panel.background = element_rect(fill = "lightsteelblue1", colour = "black"),
-                  panel.border = element_rect(colour = "black", fill=NA, size=1.5),
-                  legend.position = 'none')
-
-figure3c <- ggplot(data = line_data_, aes(x = year, y = share*100)) +
-  geom_line(aes(color=as.factor(treated)), size = 1) + 
-  scale_color_manual(values = c("steelblue4", "red"), name = "Program:", labels = c("Not covered by CAIR", "Covered by CAIR")) +
-  ylab(expression(paste("Cross-border ", SO[2], " as share of total (%)", sep=""))) +
-  ylim(0, 25) +
-  theme(axis.line = element_blank(),
-        axis.title.x = element_blank(),
-        axis.title.y = element_text(size = 10),
-        title = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.background = element_rect(fill = "lightsteelblue1", colour = "black"),
-        panel.border = element_rect(colour = "black", fill=NA, size=1.5),
-        legend.position = 'none',)
-
-
-png(filename="figure3a.png", 
-    units="in", 
-    width=3.5, 
-    height=5, 
-    pointsize=10, 
-    res=600)
-figure3
-dev.off()
-
-png(filename="figure3b.png", 
-    units="in", 
-    width=3.5, 
-    height=5, 
-    pointsize=10, 
-    res=600)
-figure3b
-dev.off()
-
-png(filename="figure3c.png", 
-    units="in", 
-    width=3.5, 
-    height=5, 
-    pointsize=10, 
-    res=600)
-figure3c
-dev.off()
-
 # figure 4 (permit demand 
 market_data <- data %>% select(id, year, treated, sulfur, permits, allocated, clearing_price) %>%
   group_by(id, year) %>%
@@ -609,8 +509,6 @@ market_data <- data %>% select(id, year, treated, sulfur, permits, allocated, cl
             price = mean(price)) 
 
 figure4 <-  ggplot(data = market_data, aes(x = year)) +
-  #geom_bar(data = market_data[market_data$treated == 1, ], aes(y = permits), stat='identity', size = 1, alpha=0.3, fill='red') +
-  #geom_bar(data = market_data[market_data$treated == 0, ], aes(y = permits), stat='identity', size = 1, alpha=.5, fill = 'steelblue4') +
   geom_line(aes(y = sulfur, color = factor(treated)), size=1) +
   geom_line(aes(y = price*100), linetype='dashed', color = 'black', size=1) +
   scale_color_manual(values = c("steelblue4", "red"), name = "Program:", labels = c("Not covered by CAIR", "Covered by CAIR")) +
@@ -641,54 +539,51 @@ dev.off()
 
 
 # figure 5 (event study plots)
+data_noimp$time_to_cair <- data_noimp$year - 2005
 
-data_matched$time_to_cair <- data_matched$year - 2005
-data_impute$time_to_cair <- data_impute$year - 2005
-
-
-ext_twfe <- feols(ext_sulfur_mean ~ i(time_to_cair, treated, ref = -1) +                           ## the key interaction: time × treatment status
+ext_twfe <- feols(ext_sulfur_mean ~ i(time_to_cair, treated, ref = -1) +                           ## the key interaction: time Ã— treatment status
                   sulfur_rate + sulfur_control + op_time + heat_input + allocated + permits   |   ## Other controls
                   id + year,                                                                              ## FEs
                   cluster = ~id,                                                                          ## Clustered SEs
-                  data = data_impute)
+                  data = data_noimp)
 
-ext_data <- data_impute %>% 
+ext_data <- data_noimp %>% 
               dplyr::select(time_to_cair) %>% 
               distinct() %>%
               cbind(c(ext_twfe$coefficients[1:7], 0, ext_twfe$coefficients[8:23]),
                     c(ext_twfe$se[1:7]*1.96, 0, ext_twfe$se[8:23]*1.96))
 
-naaqs_twfe <- feols(naaqs_violate ~ i(time_to_cair, treated, ref = -1) +                           ## the key interaction: time × treatment status
+naaqs_twfe <- feols(naaqs_violate ~ i(time_to_cair, treated, ref = -1) +                           ## the key interaction: time Ã— treatment status
                     sulfur + sulfur_control + generation + op_time + heat_input + allocated + permits   |   ## Other controls
                     id + year,                                                                              ## FEs
                   cluster = ~id,                                                                          ## Clustered SEs
-                  data = data_impute)
+                  data = data_noimp)
 
-naaqs_data <- data_impute %>% 
+naaqs_data <- data_noimp %>% 
   dplyr::select(time_to_cair) %>% 
   distinct() %>%
   cbind(c(naaqs_twfe$coefficients[1:7], 0, naaqs_twfe$coefficients[8:23]),
         c(naaqs_twfe$se[1:7]*1.96, 0, naaqs_twfe$se[8:23]*1.96))
 
 
-emit_twfe <- feols(ln_sulfur ~ i(time_to_cair, treated, ref = -1) +                          ## the key interaction: time × treatment status
+emit_twfe <- feols(ln_sulfur ~ i(time_to_cair, treated, ref = -1) +                          ## the key interaction: time Ã— treatment status
                       sulfur_control + op_time + heat_input + generation + allocated + permits  |    ## Other controls
                       id + year,                                                                 ## FEs
                       cluster = ~id,                                                             ## Clustered SEs
-                      data = data_impute)
+                      data = data_noimp)
 
-emit_data <- data_impute %>% dplyr::select(time_to_cair) %>% 
+emit_data <- data_noimp %>% dplyr::select(time_to_cair) %>% 
   distinct() %>%
   cbind(c(emit_twfe$coefficients[1:7], 0, emit_twfe$coefficients[8:23]),
         c(emit_twfe$se[1:7]*1.96, 0, emit_twfe$se[8:23]*1.96))
 
-carbon_twfe <- feols(ln_carbon ~ i(time_to_cair, treated, ref = -1) +                               ## the key interaction: time × treatment status
+carbon_twfe <- feols(ln_carbon ~ i(time_to_cair, treated, ref = -1) +                               ## the key interaction: time Ã— treatment status
                      sulfur_control + op_time + heat_input + sulfur + generation + allocated + permits |  ## Other controls
                      id + year,                                                                              ## FEs
                    cluster = ~id,                                                                          ## Clustered SEs
-                   data = data_impute)
+                   data = data_noimp)
 
-carbon_data <- data_impute %>% dplyr::select(time_to_cair) %>% 
+carbon_data <- data_noimp %>% dplyr::select(time_to_cair) %>% 
   distinct() %>%
   cbind(c(carbon_twfe$coefficients[1:7], 0, carbon_twfe$coefficients[8:23]),
         c(carbon_twfe$se[1:7]*1.96, 0, carbon_twfe$se[8:23]*1.96))
@@ -917,7 +812,4 @@ png(filename="figure7b.png",
 figure7b
 dev.off()
 
-
-
-
-
+##################################### END ################################################################
