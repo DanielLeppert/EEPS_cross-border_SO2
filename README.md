@@ -3,7 +3,7 @@ Repository to reproduce "No fences make bad neighbors, but markets make better o
 
 This repository generates the data panel for the working paper "No fences make bad neighbors, but markets make better ones: Cap and trade reduces cross-border SO2 in a natural experiment". The dataset is made up of publicly available survey- and monitoring products by the U.S. Environmental Protection Agency, the U.S. Energy Information Administration, and National Oceanic and Atmospheric Administration. Complete citations to these data are listed in the working paper bibliography. 
 
-#### Before running this program, ensure that all associated folders and files are included as specified in the documentation and that no changes have been made to file names or data. Running the file directly from the master folder [Leppert2020Geog] available to download from [https://github.com/DanielLeppert] ensures this. 
+#### Before running this program, ensure that all associated folders and files are included as specified in the documentation and that no changes have been made to file names or data. Running the file directly from the master folder [EEPS_cross-border_SO2] available to download from [https://github.com/DanielLeppert] ensures this. 
 
 To replicate the "data_final.csv" file, run "main.py":
 
